@@ -6,6 +6,8 @@ from pathlib import Path
 
 from .permissions import PermissionLevel
 
+MIN_AUTH_TOKEN_LENGTH = 32
+
 
 @dataclass(frozen=True)
 class Config:
@@ -18,8 +20,14 @@ class Config:
 
     Optional:
         NEXTCLOUD_MCP_PERMISSIONS: Permission level — 'read' (default), 'write', or 'destructive'
-        NEXTCLOUD_MCP_HOST: Host to bind HTTP server (default: 0.0.0.0)
+        NEXTCLOUD_MCP_HOST: Host to bind HTTP server (default: 127.0.0.1). A non-loopback host
+            requires NEXTCLOUD_MCP_AUTH_TOKEN.
         NEXTCLOUD_MCP_PORT: Port for HTTP server (default: 8100)
+        NEXTCLOUD_MCP_AUTH_TOKEN: Bearer token every HTTP request must present (HTTP transport only).
+            At least 32 printable ASCII characters without spaces.
+        NEXTCLOUD_MCP_DISABLED_TOOLS: Comma-separated tool names to remove from the server
+        NEXTCLOUD_MCP_AUDIT_LOG: 'stderr' or a file path; logs one JSON line per tool call (names of
+            the arguments only, never their values)
         NEXTCLOUD_MCP_RETRY_MAX: Max retries on 429/503 (default: 3, 0 to disable)
         NEXTCLOUD_MCP_APP_PASSWORD: Set to 'true' when using an app password to skip session caching
         NEXTCLOUD_MCP_UPLOAD_ROOT: Absolute path to a local directory. When set, enables the
@@ -29,13 +37,16 @@ class Config:
 
     nextcloud_url: str = field(default="")
     user: str = field(default="")
-    password: str = field(default="")
+    password: str = field(default="", repr=False)
     permission_level: PermissionLevel = field(default=PermissionLevel.READ)
-    host: str = field(default="0.0.0.0")
+    host: str = field(default="127.0.0.1")
     port: int = field(default=8100)
     retry_max: int = field(default=3)
     is_app_password: bool = field(default=False)
     upload_root: str = field(default="")
+    auth_token: str = field(default="", repr=False)
+    disabled_tools: frozenset[str] = field(default_factory=frozenset[str])
+    audit_log: str = field(default="")
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -51,7 +62,7 @@ class Config:
             valid = ", ".join(p.value for p in PermissionLevel)
             raise ValueError(f"Invalid NEXTCLOUD_MCP_PERMISSIONS='{perm_str}'. Valid values: {valid}") from None
 
-        host = os.environ.get("NEXTCLOUD_MCP_HOST", "0.0.0.0")
+        host = os.environ.get("NEXTCLOUD_MCP_HOST", "127.0.0.1")
         port = int(os.environ.get("NEXTCLOUD_MCP_PORT", "8100"))
         retry_raw = os.environ.get("NEXTCLOUD_MCP_RETRY_MAX", "3")
         try:
@@ -78,6 +89,9 @@ class Config:
         else:
             upload_root = ""
 
+        disabled_raw = os.environ.get("NEXTCLOUD_MCP_DISABLED_TOOLS", "")
+        disabled_tools = frozenset(name.strip() for name in disabled_raw.split(",") if name.strip())
+
         return cls(
             nextcloud_url=url,
             user=user,
@@ -88,6 +102,9 @@ class Config:
             retry_max=max(0, retry_max),
             is_app_password=is_app_password,
             upload_root=upload_root,
+            auth_token=os.environ.get("NEXTCLOUD_MCP_AUTH_TOKEN", "").strip(),
+            disabled_tools=disabled_tools,
+            audit_log=os.environ.get("NEXTCLOUD_MCP_AUDIT_LOG", "").strip(),
         )
 
     def validate(self) -> None:
@@ -104,3 +121,9 @@ class Config:
                 f"Missing required environment variables: {', '.join(missing)}. "
                 f"Set them before starting the MCP server."
             )
+        if self.auth_token:
+            # The value itself must never appear in an error message.
+            if len(self.auth_token) < MIN_AUTH_TOKEN_LENGTH:
+                raise ValueError(f"NEXTCLOUD_MCP_AUTH_TOKEN must be at least {MIN_AUTH_TOKEN_LENGTH} characters long.")
+            if not all("!" <= char <= "~" for char in self.auth_token):
+                raise ValueError("NEXTCLOUD_MCP_AUTH_TOKEN must contain only printable ASCII characters, no spaces.")

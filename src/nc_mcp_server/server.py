@@ -2,6 +2,7 @@
 
 from mcp.server.fastmcp import FastMCP
 
+from .audit import configure_audit
 from .client import NextcloudClient
 from .config import Config
 from .permissions import set_permission_level
@@ -86,4 +87,18 @@ def create_server(config: Config | None = None) -> FastMCP:
     versions.register(mcp)
     users.register(mcp)
 
+    _remove_disabled_tools(mcp, config.disabled_tools)
+    configure_audit(config.audit_log)
     return mcp
+
+
+def _remove_disabled_tools(mcp: FastMCP, disabled: frozenset[str]) -> None:
+    """Unregister the tools named in NEXTCLOUD_MCP_DISABLED_TOOLS; a typo must not leave a tool silently enabled."""
+    registered = {tool.name for tool in mcp._tool_manager.list_tools()}
+    unknown = disabled - registered
+    if unknown:
+        raise ValueError(
+            "NEXTCLOUD_MCP_DISABLED_TOOLS names tools that are not registered: " + ", ".join(sorted(unknown))
+        )
+    for name in disabled:
+        mcp.remove_tool(name)

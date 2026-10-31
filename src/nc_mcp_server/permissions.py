@@ -2,8 +2,11 @@
 
 import enum
 import functools
+import time
 from collections.abc import Callable
 from typing import Any, TypeVar
+
+from .audit import record_call
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -72,10 +75,22 @@ def require_permission(level: PermissionLevel) -> Callable[[F], F]:
     def decorator(func: F) -> F:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            started = time.monotonic()
             current = get_permission_level()
             if not current.includes(level):
+                record_call(func.__name__, level.value, kwargs, "denied", started)
                 raise PermissionDeniedError(func.__name__, level, current)
-            return await func(*args, **kwargs)
+            # Stays "cancelled" if a BaseException such as asyncio.CancelledError interrupts the call.
+            outcome = "cancelled"
+            try:
+                result = await func(*args, **kwargs)
+                outcome = "ok"
+            except Exception as exc:
+                outcome = f"error:{type(exc).__name__}"
+                raise
+            finally:
+                record_call(func.__name__, level.value, kwargs, outcome, started)
+            return result
 
         # Store the required level on the function for introspection
         wrapper._required_permission = level  # type: ignore[attr-defined]

@@ -112,6 +112,17 @@ export NEXTCLOUD_MCP_RETRY_MAX=3       # max retries on 429/503 (default: 3, 0 t
 export NEXTCLOUD_MCP_UPLOAD_ROOT=      # unset (default). If set to an absolute directory,
                                        # enables upload_file_from_path, restricted to files
                                        # inside that directory (symlinks resolved).
+export NEXTCLOUD_MCP_DISABLED_TOOLS=   # comma-separated tool names to remove, e.g. delete_user,create_user.
+                                       # An unknown or unregistered name stops the server at startup.
+export NEXTCLOUD_MCP_AUDIT_LOG=        # unset (default, no audit). 'stderr' or a file path: one JSON line
+                                       # per tool call, argument names only, never their values.
+
+# HTTP transport only (nc-mcp-server --transport http)
+export NEXTCLOUD_MCP_HOST=127.0.0.1    # bind address (default: 127.0.0.1). Any non-loopback address
+                                       # requires NEXTCLOUD_MCP_AUTH_TOKEN.
+export NEXTCLOUD_MCP_PORT=8100         # port (default: 8100)
+export NEXTCLOUD_MCP_AUTH_TOKEN=       # bearer token required on every HTTP request; at least 32
+                                       # printable ASCII characters, no spaces.
 ```
 
 ### Getting an App Password
@@ -167,8 +178,53 @@ claude mcp add nextcloud \
 
 ```bash
 nc-mcp-server --transport http
-# Listens on http://0.0.0.0:8100 by default
+# Listens on http://127.0.0.1:8100/mcp by default (local machine only)
 ```
+
+The HTTP transport is stateless streamable HTTP, served at `/mcp`.
+
+**Bind address.** The server binds to `127.0.0.1` by default. To accept connections from other machines (or
+from outside a container), set `NEXTCLOUD_MCP_HOST=0.0.0.0` (or a specific address) **and**
+`NEXTCLOUD_MCP_AUTH_TOKEN`: the server refuses to start on a non-loopback address without a token.
+
+**Bearer token.** When `NEXTCLOUD_MCP_AUTH_TOKEN` is set, every HTTP request, on every path, must carry
+`Authorization: Bearer <token>`; anything else gets `401`. The token is compared in constant time and is never
+logged. Generate one with e.g. `openssl rand -hex 32`. The token protects the MCP endpoint, not the transport:
+outside a trusted network, put the server behind a TLS reverse proxy.
+
+```bash
+export NEXTCLOUD_MCP_HOST=0.0.0.0
+export NEXTCLOUD_MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+nc-mcp-server --transport http
+
+# Client side
+claude mcp add --transport http nextcloud http://mcp-host:8100/mcp \
+  --header "Authorization: Bearer $NEXTCLOUD_MCP_AUTH_TOKEN"
+```
+
+**Host header check.** On a loopback bind (`127.0.0.1`, `localhost`, `::1`) the MCP SDK also enables its DNS
+rebinding protection: requests whose `Host` header is not `127.0.0.1:*`, `localhost:*` or `[::1]:*` get `421`.
+A reverse proxy on the same machine must therefore forward with such a `Host` (nginx does by default with
+`proxy_pass http://127.0.0.1:8100;`; Caddy and Traefik keep the client's `Host` unless told otherwise). This check
+is not active on a non-loopback bind, where the bearer token is the protection.
+
+**Audit log.** `NEXTCLOUD_MCP_AUDIT_LOG=stderr` or `NEXTCLOUD_MCP_AUDIT_LOG=/var/log/nc-mcp/audit.log` writes one
+JSON line per tool call (stdio and HTTP alike). The file is created with mode `600` and opened in append mode; an
+unwritable path stops the server at startup. Entries record the tool, its permission level, the *names* of the
+arguments and the outcome (`ok`, `denied`, `cancelled` or `error:<ExceptionType>`), never argument values or
+error messages:
+
+```json
+{"ts": "2026-10-31T16:59:46.752+00:00", "tool": "list_directory", "level": "read", "args": ["limit", "offset", "path"], "outcome": "ok", "ms": 220}
+{"ts": "2026-10-31T16:59:46.783+00:00", "tool": "create_directory", "level": "write", "args": ["path"], "outcome": "denied", "ms": 0}
+```
+
+There is a single token, so the log cannot tell clients apart; calls to a tool that does not exist (or was
+disabled) are rejected by the MCP layer before reaching the audit hook and are not logged.
+
+**Disabling tools.** `NEXTCLOUD_MCP_DISABLED_TOOLS=delete_user,create_user,disable_app` removes these tools from
+the server entirely (they are neither listed nor callable), on top of the permission level. This is useful to keep
+`write` or `destructive` while dropping a few tools you never want an AI client to use.
 
 ### Stdio Mode (default)
 
